@@ -2,6 +2,7 @@ const express = require('express');
 const cors = require('cors');
 const { MongoClient, ObjectId } = require('mongodb');
 require("dotenv").config();
+const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 
 const app = express();
 const port = process.env.PORT || 5000;
@@ -174,6 +175,108 @@ async function run() {
                   } catch (error) {
                         console.error('[/api/users/:id/admin PATCH] error:', error);
                         res.status(500).send({ message: "Administrative privilege update failed.", error: error.message });
+                  }
+            });
+
+            // ── Funding: list all funds (admin/volunteer view) ─────────────────
+            // Returns every funding record, newest first, with donor name/amount/date.
+            app.get('/api/fundings', async (req, res) => {
+                  try {
+                        const result = await fundingsCollection.find().sort({ createdAt: -1 }).toArray();
+                        res.send(result);
+                  } catch (error) {
+                        console.error('[/api/fundings GET] error:', error);
+                        res.status(500).send({ message: "Failed to load funding records.", error: error.message });
+                  }
+            });
+
+            // ── Funding: total amount raised ────────────────────────────────────
+            // Lightweight endpoint for dashboard cards — avoids shipping every
+            // funding row just to show one number.
+            app.get('/api/fundings/total', async (req, res) => {
+                  try {
+                        const agg = await fundingsCollection.aggregate([
+                              { $group: { _id: null, total: { $sum: "$amount" }, count: { $sum: 1 } } }
+                        ]).toArray();
+                        res.send({
+                              totalFunding: agg[0]?.total || 0,
+                              totalDonations: agg[0]?.count || 0,
+                        });
+                  } catch (error) {
+                        console.error('[/api/fundings/total] error:', error);
+                        res.status(500).send({ message: "Failed to calculate total funding.", error: error.message });
+                  }
+            });
+
+            // ── Funding: create a Stripe PaymentIntent ──────────────────────────
+            // Client sends a USD amount in dollars; we convert to cents server-side
+            // so the client can never tamper with what Stripe actually charges.
+            app.post('/api/fundings/create-payment-intent', async (req, res) => {
+                  try {
+                        const { amount } = req.body;
+                        const numericAmount = Number(amount);
+
+                        if (!numericAmount || numericAmount <= 0) {
+                              return res.status(400).send({ message: "Enter an amount greater than 0." });
+                        }
+                        // Stripe minimum charge is $0.50 USD.
+                        if (numericAmount < 0.5) {
+                              return res.status(400).send({ message: "Minimum donation is $0.50." });
+                        }
+
+                        const amountInCents = Math.round(numericAmount * 100);
+
+                        const paymentIntent = await stripe.paymentIntents.create({
+                              amount: amountInCents,
+                              currency: 'usd',
+                              automatic_payment_methods: { enabled: true },
+                        });
+
+                        res.send({ clientSecret: paymentIntent.client_secret });
+                  } catch (error) {
+                        console.error('[/api/fundings/create-payment-intent] error:', error);
+                        res.status(500).send({ message: "Could not start payment.", error: error.message });
+                  }
+            });
+
+            // ── Funding: record a completed donation ────────────────────────────
+            // Called by the client once Stripe confirms the PaymentIntent succeeded.
+            // Re-verifies the PaymentIntent with Stripe directly rather than trusting
+            // the client's word, so a forged request can't fabricate a funding row.
+            app.post('/api/fundings', async (req, res) => {
+                  try {
+                        const { paymentIntentId, name, email } = req.body;
+
+                        if (!paymentIntentId) {
+                              return res.status(400).send({ message: "Missing payment reference." });
+                        }
+
+                        const paymentIntent = await stripe.paymentIntents.retrieve(paymentIntentId);
+
+                        if (paymentIntent.status !== 'succeeded') {
+                              return res.status(400).send({ message: "Payment has not completed yet." });
+                        }
+
+                        // Avoid double-recording if the client retries the request.
+                        const existing = await fundingsCollection.findOne({ paymentIntentId });
+                        if (existing) {
+                              return res.send(existing);
+                        }
+
+                        const fundingDoc = {
+                              name: name || 'Anonymous',
+                              email: email || null,
+                              amount: paymentIntent.amount / 100,
+                              currency: paymentIntent.currency,
+                              paymentIntentId,
+                              createdAt: new Date(),
+                        };
+
+                        const result = await fundingsCollection.insertOne(fundingDoc);
+                        res.send({ ...fundingDoc, _id: result.insertedId });
+                  } catch (error) {
+                        console.error('[/api/fundings POST] error:', error);
+                        res.status(500).send({ message: "Failed to record funding.", error: error.message });
                   }
             });
 
