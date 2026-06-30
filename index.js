@@ -26,6 +26,16 @@ async function run() {
 
             console.log("Successfully synchronized connection to MongoDB (BloodBridge).");
 
+            // Helper: validate Mongo ObjectId and respond 400 if invalid.
+            // Returns the ObjectId on success, or null after already sending a response.
+            const parseObjectId = (id, res) => {
+                  if (!ObjectId.isValid(id)) {
+                        res.status(400).send({ message: "Invalid id." });
+                        return null;
+                  }
+                  return new ObjectId(id);
+            };
+
             app.get('/api/dashboard/stats', async (req, res) => {
                   try {
                         const totalDonors = await usersCollection.countDocuments({ role: "Donor" });
@@ -39,7 +49,8 @@ async function run() {
 
                         res.send({ totalDonors, totalFunding, totalRequests });
                   } catch (error) {
-                        res.status(500).send({ message: "Failed to load dashboard metrics.", error });
+                        console.error('[/api/dashboard/stats] error:', error);
+                        res.status(500).send({ message: "Failed to load dashboard metrics.", error: error.message });
                   }
             });
 
@@ -61,7 +72,8 @@ async function run() {
                         const result = await usersCollection.find(query).toArray();
                         res.send(result);
                   } catch (error) {
-                        res.status(500).send({ message: "Failed to retrieve user accounts.", error });
+                        console.error('[/api/users GET] error:', error);
+                        res.status(500).send({ message: "Failed to retrieve user accounts.", error: error.message });
                   }
             });
 
@@ -98,21 +110,70 @@ async function run() {
                   }
             });
 
-          
+            // ── Self-service profile update ──────────────────────────────────
+            // Used by the logged-in user's own "My Profile" page to update their
+            // own name / avatar / blood group / district / upazila.
+            // Intentionally does NOT allow changing `role` or `status` — that's
+            // handled separately below via the admin-only route, so a user can't
+            // promote themselves to Admin by hitting this endpoint.
             app.patch('/api/users/:id', async (req, res) => {
                   try {
-                        const id = req.params.id;
-                        const { status, role } = req.body;
+                        const id = parseObjectId(req.params.id, res);
+                        if (!id) return;
 
-                        let updateDoc = { $set: {} };
-                        if (status) updateDoc.$set.status = status; 
-                        if (role) updateDoc.$set.role = role;      
+                        const allowedFields = ['name', 'avatar', 'bloodGroup', 'district', 'upazila'];
+                        const updateDoc = { $set: {} };
+                        for (const key of allowedFields) {
+                              if (req.body[key] !== undefined) {
+                                    updateDoc.$set[key] = req.body[key];
+                              }
+                        }
 
-                        const filter = { _id: new ObjectId(id) };
-                        const result = await usersCollection.updateOne(filter, updateDoc);
+                        if (Object.keys(updateDoc.$set).length === 0) {
+                              return res.status(400).send({ message: "No valid profile fields provided." });
+                        }
+
+                        const result = await usersCollection.updateOne({ _id: id }, updateDoc);
+
+                        if (result.matchedCount === 0) {
+                              return res.status(404).send({ message: "User not found." });
+                        }
+
                         res.send(result);
                   } catch (error) {
-                        res.status(500).send({ message: "Administrative privilege update failed.", error });
+                        console.error('[/api/users/:id PATCH] error:', error);
+                        res.status(500).send({ message: "Profile update failed.", error: error.message });
+                  }
+            });
+
+            // ── Admin: role / status management ──────────────────────────────
+            // TODO: protect this route with admin-only auth middleware before
+            // going to production — currently anyone who can reach this server
+            // can promote/demote/block any user.
+            app.patch('/api/users/:id/admin', async (req, res) => {
+                  try {
+                        const id = parseObjectId(req.params.id, res);
+                        if (!id) return;
+
+                        const { status, role } = req.body;
+                        const updateDoc = { $set: {} };
+                        if (status) updateDoc.$set.status = status;
+                        if (role) updateDoc.$set.role = role;
+
+                        if (Object.keys(updateDoc.$set).length === 0) {
+                              return res.status(400).send({ message: "No valid fields (status/role) provided." });
+                        }
+
+                        const result = await usersCollection.updateOne({ _id: id }, updateDoc);
+
+                        if (result.matchedCount === 0) {
+                              return res.status(404).send({ message: "User not found." });
+                        }
+
+                        res.send(result);
+                  } catch (error) {
+                        console.error('[/api/users/:id/admin PATCH] error:', error);
+                        res.status(500).send({ message: "Administrative privilege update failed.", error: error.message });
                   }
             });
 
@@ -136,7 +197,8 @@ async function run() {
                         const result = await donationRequestsCollection.insertOne(finalDocument);
                         res.send(result);
                   } catch (error) {
-                        res.status(500).send({ message: "Failed to create donation request entry.", error });
+                        console.error('[/api/donation-requests POST] error:', error);
+                        res.status(500).send({ message: "Failed to create donation request entry.", error: error.message });
                   }
             });
 
@@ -151,45 +213,74 @@ async function run() {
                         const result = await donationRequestsCollection.find(query).sort({ createdAt: -1 }).toArray();
                         res.send(result);
                   } catch (error) {
-                        res.status(500).send({ message: "Failed to fetch blood requests matrix.", error });
+                        console.error('[/api/donation-requests GET] error:', error);
+                        res.status(500).send({ message: "Failed to fetch blood requests matrix.", error: error.message });
                   }
             });
 
             app.get('/api/donation-requests/:id', async (req, res) => {
                   try {
-                        const id = req.params.id;
-                        const result = await donationRequestsCollection.findOne({ _id: new ObjectId(id) });
+                        const id = parseObjectId(req.params.id, res);
+                        if (!id) return;
+
+                        const result = await donationRequestsCollection.findOne({ _id: id });
+
+                        if (!result) {
+                              return res.status(404).send({ message: "Donation request not found." });
+                        }
+
                         res.send(result);
                   } catch (error) {
-                        res.status(500).send({ message: "Failed to find requested target profile record.", error });
+                        console.error('[/api/donation-requests/:id GET] error:', error);
+                        res.status(500).send({ message: "Failed to find requested target profile record.", error: error.message });
                   }
             });
 
             app.put('/api/donation-requests/:id', async (req, res) => {
                   try {
-                        const id = req.params.id;
-                        const updatedFields = req.body;
-                        const filter = { _id: new ObjectId(id) };
+                        const id = parseObjectId(req.params.id, res);
+                        if (!id) return;
 
-                        const updateDoc = {
-                              $set: updatedFields
-                        };
+                        const updatedFields = { ...req.body };
+                        // Never allow the client to overwrite immutable/system fields.
+                        delete updatedFields._id;
+                        delete updatedFields.createdAt;
 
-                        const result = await donationRequestsCollection.updateOne(filter, updateDoc);
+                        if (Object.keys(updatedFields).length === 0) {
+                              return res.status(400).send({ message: "No valid fields provided." });
+                        }
+
+                        const result = await donationRequestsCollection.updateOne(
+                              { _id: id },
+                              { $set: updatedFields }
+                        );
+
+                        if (result.matchedCount === 0) {
+                              return res.status(404).send({ message: "Donation request not found." });
+                        }
+
                         res.send(result);
                   } catch (error) {
-                        res.status(500).send({ message: "Failed to rewrite ledger fields.", error });
+                        console.error('[/api/donation-requests/:id PUT] error:', error);
+                        res.status(500).send({ message: "Failed to rewrite ledger fields.", error: error.message });
                   }
             });
 
             app.delete('/api/donation-requests/:id', async (req, res) => {
                   try {
-                        const id = req.params.id;
-                        const filter = { _id: new ObjectId(id) };
-                        const result = await donationRequestsCollection.deleteOne(filter);
+                        const id = parseObjectId(req.params.id, res);
+                        if (!id) return;
+
+                        const result = await donationRequestsCollection.deleteOne({ _id: id });
+
+                        if (result.deletedCount === 0) {
+                              return res.status(404).send({ message: "Donation request not found." });
+                        }
+
                         res.send(result);
                   } catch (error) {
-                        res.status(500).send({ message: "Critical error encountered deleting entry document.", error });
+                        console.error('[/api/donation-requests/:id DELETE] error:', error);
+                        res.status(500).send({ message: "Critical error encountered deleting entry document.", error: error.message });
                   }
             });
 
