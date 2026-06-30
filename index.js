@@ -7,8 +7,33 @@ const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 const app = express();
 const port = process.env.PORT || 5000;
 
-// Middleware
-app.use(cors());
+// ── CORS ──────────────────────────────────────────────────────────────
+// Allows your stable production domain plus any Vercel preview deployment
+// URL for this project (e.g. bloodbridge-ea6r7duvs-...vercel.app), since
+// those change on every deploy and a single fixed origin will reject them.
+const allowedOrigins = [
+      'http://localhost:3000',
+      process.env.CLIENT_URL, // e.g. https://bloodbridge.vercel.app — set this in your env
+];
+
+app.use(cors({
+      origin: (origin, callback) => {
+            // Allow non-browser requests (curl, server-to-server, etc) with no Origin header
+            if (!origin) return callback(null, true);
+
+            const isAllowed =
+                  allowedOrigins.includes(origin) ||
+                  /^https:\/\/bloodbridge(-[a-z0-9-]+)?\.vercel\.app$/.test(origin);
+
+            if (isAllowed) {
+                  callback(null, true);
+            } else {
+                  console.warn(`[CORS] Blocked request from origin: ${origin}`);
+                  callback(new Error('Not allowed by CORS'));
+            }
+      },
+      credentials: true,
+}));
 app.use(express.json());
 
 // MongoDB Connection Setup
@@ -398,6 +423,14 @@ app.get('/', (req, res) => {
       res.send('BloodBridge Core Platform Server Engine Active');
 });
 
-app.listen(port, () => {
-      console.log(`BloodBridge microservices running securely on port ${port}`);
-});
+// On Vercel, the platform imports `app` and invokes it per-request as a
+// serverless function — it does NOT call app.listen for you. Calling
+// app.listen there is harmless but unnecessary; locally (or on any
+// non-serverless host) we still want it to actually bind to a port.
+if (!process.env.VERCEL) {
+      app.listen(port, () => {
+            console.log(`BloodBridge microservices running securely on port ${port}`);
+      });
+}
+
+module.exports = app;
