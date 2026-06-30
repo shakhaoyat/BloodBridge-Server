@@ -20,7 +20,7 @@ async function run() {
             const db = client.db("BloodBridge");
 
             // Collections
-            const usersCollection = db.collection("users");
+            const usersCollection = db.collection("user");
             const donationRequestsCollection = db.collection("donationRequests");
             const fundingsCollection = db.collection("fundings"); // Optional: for funding statistics
 
@@ -43,18 +43,58 @@ async function run() {
                   }
             });
 
+            // Escapes regex special characters so values like "A+" or "AB-" are
+            // matched literally instead of being interpreted as regex syntax.
+            const escapeRegex = (str) => String(str).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
             app.get('/api/users', async (req, res) => {
                   try {
-                        const { status } = req.query;
+                        const { status, role } = req.query;
                         let query = {};
                         if (status && status !== 'all') {
-                              
-                              query.status = status.charAt(0).toUpperCase() + status.slice(1).toLowerCase();
+                              // Case-insensitive match so "active"/"Active"/"ACTIVE" all work
+                              query.status = { $regex: `^${escapeRegex(status)}$`, $options: 'i' };
+                        }
+                        if (role) {
+                              query.role = { $regex: `^${escapeRegex(role)}$`, $options: 'i' };
                         }
                         const result = await usersCollection.find(query).toArray();
                         res.send(result);
                   } catch (error) {
                         res.status(500).send({ message: "Failed to retrieve user accounts.", error });
+                  }
+            });
+
+            // Public donor/volunteer search — used by the "Search Donors" page.
+            // Matches users whose role is Donor or Volunteer, status Active,
+            // with optional name / bloodGroup / district / upazila filters.
+            app.get('/api/donors', async (req, res) => {
+                  try {
+                        const { name, bloodGroup, district, upazila } = req.query;
+
+                        const query = {
+                              role: { $in: [/^donor$/i, /^volunteer$/i] },
+                              status: { $regex: '^active$', $options: 'i' },
+                        };
+
+                        if (name) {
+                              query.name = { $regex: escapeRegex(name), $options: 'i' };
+                        }
+                        if (bloodGroup) {
+                              query.bloodGroup = { $regex: `^${escapeRegex(bloodGroup)}$`, $options: 'i' };
+                        }
+                        if (district) {
+                              query.district = { $regex: `^${escapeRegex(district)}$`, $options: 'i' };
+                        }
+                        if (upazila) {
+                              query.upazila = { $regex: `^${escapeRegex(upazila)}$`, $options: 'i' };
+                        }
+
+                        const result = await usersCollection.find(query).toArray();
+                        res.send(result);
+                  } catch (error) {
+                        console.error('[/api/donors] error:', error);
+                        res.status(500).send({ message: "Failed to search donors.", error: error.message });
                   }
             });
 
